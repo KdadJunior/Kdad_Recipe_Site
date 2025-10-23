@@ -1,5 +1,5 @@
 # Kdad_Recipe_Site
-# Project 2: The Meals LAN - Recipe Management Backend
+# The Meals LAN - Recipe Management Backend
 
 A comprehensive Flask-based REST API for a recipe management system, built as an extension of a user authentication system. This project demonstrates full-stack development skills with secure authentication, database management, and RESTful API design.
 
