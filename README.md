@@ -1,53 +1,63 @@
-# Kdad_Recipe_Site
-# The Meals LAN - Recipe Management Backend
+# Kdad_Recipe_Site  
+# The Meals LAN — Recipe Management Backend
 
-A comprehensive Flask-based REST API for a recipe management system, built as an extension of a user authentication system. This project demonstrates full-stack development skills with secure authentication, database management, and RESTful API design.
+A Flask-based REST API for managing users and recipes with secure JWT auth, likes, follows, and flexible search (feed, popular, ingredients). Built to demonstrate real-world backend design: authentication, relational data modeling, and production-style endpoints.
+
+---
 
 ## 🚀 Features
 
-### User Management (Project 1 Foundation)
-- **Secure User Registration** with password validation
-- **JWT-based Authentication** with HMAC-SHA256 signing
-- **Password Security** with salt-based hashing and history tracking
-- **User Login/Logout** functionality
+- **JWT Auth** with HMAC-SHA256 signing and secure password hashing
+- **Recipes**: create, view (field-selectable), like
+- **Social graph**: follow other users; feed built from follow graph
+- **Search modes**:  
+  - **Feed**: latest from followed users  
+  - **Popular**: top liked recipes  
+  - **Ingredients**: filter by ingredient list
+- **Safe deletes** with cascading cleanup for user-owned data
 
-### Recipe Management (Project 2 Extensions)
-- **Recipe CRUD Operations** - Create, view, and manage recipes
-- **Recipe Liking System** - Like/unlike recipes with real-time counts
-- **Advanced Search** - Search recipes by title or ingredients
-- **User Recipe Views** - View all recipes by specific users
-- **Comprehensive Metadata** - Prep time, cook time, servings, descriptions
+---
 
-## 🛠️ Technology Stack
+## 🛠️ Tech Stack
 
-- **Backend**: Python 3.9+ with Flask
-- **Database**: SQLite3 with relational schema
-- **Authentication**: JWT tokens with HMAC-SHA256
-- **Security**: Password hashing with SHA-256 and salt
-- **API Design**: RESTful endpoints with proper HTTP methods
+- **Backend**: Python 3.9+, Flask
+- **DB**: SQLite3 (relational, FK + cascades)
+- **Auth**: JWT (HMAC-SHA256)
+- **Security**: salted password hashing, password history, input validation
+
+---
 
 ## 📋 API Endpoints
 
-### Authentication Endpoints
-| Method | Endpoint | Description | Auth Required |
-|--------|----------|-------------|---------------|
-| GET | `/clear` | Clear database and recreate tables | No |
-| POST | `/create_user` | Register new user account | No |
-| POST | `/login` | User authentication | No |
+### Authentication
+| Method | Endpoint | Description | Auth |
+|---|---|---|---|
+| POST | `/login` | Verifies credentials and returns a JWT (`{"status":1,"jwt":"<TOKEN>"}`) | No |
 
-### Recipe Management Endpoints
-| Method | Endpoint | Description | Auth Required |
-|--------|----------|-------------|---------------|
-| POST | `/create_recipe` | Create new recipe | Yes (JWT) |
-| GET | `/view_recipe/<id>` | View specific recipe details | Yes (JWT) |
-| POST | `/like_recipe/<id>` | Like/unlike recipe | Yes (JWT) |
-| GET | `/search_recipes` | Search recipes by title/ingredients | Yes (JWT) |
-| GET | `/view_user_recipes` | View all recipes by user | Yes (JWT) |
+### Recipes
+| Method | Endpoint | Description | Auth |
+|---|---|---|---|
+| POST | `/create_recipe` | Create a recipe. Form params: `recipe_id` (int), `name` (str), `description` (str), `ingredients` (JSON list, optional) | Yes |
+| GET | `/view_recipe/<int:recipe_id>` | Return only the fields you request via query flags: `name`, `description`, `likes`, `ingredients` (each `True`/`False`) | Yes |
+| POST | `/like` | Like a recipe (one like per user per recipe) | Yes |
 
-## 🗄️ Database Schema
+### Social
+| Method | Endpoint | Description | Auth |
+|---|---|---|---|
+| POST | `/follow` | Follow a user by `username` (form) | Yes |
+| GET | `/search` | Multi-mode search. Query flags: `feed=True` (recent from followed users), `popular=True` (top by likes), or `ingredients=[...]` (JSON list) | Yes |
 
-### Users Table
+### Account
+| Method | Endpoint | Description | Auth |
+|---|---|---|---|
+| POST | `/delete` | Delete your own account; cascades remove your recipes/likes/follows | Yes |
+
+---
+
+## 🗄️ Database Schema (SQLite)
+
 ```sql
+-- users + password history
 CREATE TABLE users (
     id INTEGER PRIMARY KEY,
     first_name TEXT NOT NULL,
@@ -58,37 +68,46 @@ CREATE TABLE users (
     salt TEXT NOT NULL,
     password_created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-```
 
-### Recipes Table
-```sql
-CREATE TABLE recipes (
+CREATE TABLE password_history (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT,
-    ingredients TEXT NOT NULL,
-    instructions TEXT NOT NULL,
-    prep_time INTEGER,
-    cook_time INTEGER,
-    servings INTEGER,
+    pass_hash TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users (id)
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
-```
 
-### Likes Table
-```sql
+-- recipes + likes (unique per user/recipe)
+CREATE TABLE recipes (
+    recipe_id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    ingredients TEXT, -- JSON list (optional)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE TABLE likes (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL,
     recipe_id INTEGER NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users (id),
-    FOREIGN KEY (recipe_id) REFERENCES recipes (id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (recipe_id) REFERENCES recipes(recipe_id) ON DELETE CASCADE,
     UNIQUE(user_id, recipe_id)
 );
-```
+
+-- social graph
+CREATE TABLE follows (
+    id INTEGER PRIMARY KEY,
+    follower_id INTEGER NOT NULL,
+    following_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (following_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(follower_id, following_id)
+);
 
 ## 🔐 Security Features
 
