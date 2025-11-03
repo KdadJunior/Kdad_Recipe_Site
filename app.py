@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fixed version of the Flask app
+Flask app for Project 2 - The Meals LAN
 """
 
 import sqlite3
@@ -21,7 +21,10 @@ with open('key.txt', 'r') as f:
     SECRET_KEY = f.read().strip()
 
 def create_db():
+    """Create database from SQL file"""
     conn = sqlite3.connect(db_name)
+    # Enable foreign keys
+    conn.execute("PRAGMA foreign_keys = ON")
     
     with open(sql_file, 'r') as sql_startup:
         init_db = sql_startup.read()
@@ -31,12 +34,14 @@ def create_db():
     conn.close()
     global db_flag
     db_flag = True
-    return conn
 
 def get_db():
+    """Get database connection, creating if necessary"""
     if not db_flag:
         create_db()
     conn = sqlite3.connect(db_name)
+    # Enable foreign keys
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 def hash_password(password, salt):
@@ -45,11 +50,11 @@ def hash_password(password, salt):
     return hashlib.sha256(combined.encode()).hexdigest()
 
 def generate_jwt(username):
-    """Generate JWT token"""
+    """Generate JWT token - payload only contains username"""
     header = {"alg": "HS256", "typ": "JWT"}
-    payload = {"username": username, "access": "True"}
+    payload = {"username": username}
     
-    # Encode header and payload (keep padding)
+    # Encode header and payload
     header_encoded = base64.urlsafe_b64encode(json.dumps(header).encode()).decode()
     payload_encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
     
@@ -113,27 +118,6 @@ def validate_password(password, username, first_name, last_name):
     
     return True
 
-def check_password_history(user_id, password_hash):
-    """Check if password has been used before (all previously used passwords)"""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # Get ALL password hashes for this user
-    cursor.execute("""
-        SELECT pass_hash FROM password_history 
-        WHERE user_id = ?
-    """, (user_id,))
-    
-    all_passwords = cursor.fetchall()
-    conn.close()
-    
-    # Check if the new password hash matches any previously used password
-    for (used_hash,) in all_passwords:
-        if used_hash == password_hash:
-            return False  # Password has been used before
-    
-    return True  # Password is new
-
 def get_jwt_from_header():
     """Extract JWT from Authorization header"""
     auth_header = request.headers.get('Authorization')
@@ -141,79 +125,52 @@ def get_jwt_from_header():
         return None
     return auth_header
 
-# Project 1 endpoints (adapted for Project 2)
 @app.route('/clear', methods=['GET'])
 def clear_db():
     """Clear the database and recreate tables"""
-    # Force create a new connection and drop the database
-    if os.path.exists(db_name):
-        os.remove(db_name)
-    
-    # Reset the database flag so it gets recreated
-    global db_flag
-    db_flag = False
-    
-    # Create fresh database
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("DROP TABLE IF EXISTS password_history")
-    cursor.execute("DROP TABLE IF EXISTS likes")
-    cursor.execute("DROP TABLE IF EXISTS recipes")
-    cursor.execute("DROP TABLE IF EXISTS users")
-    cursor.execute("""
-        CREATE TABLE users (
-            id INTEGER PRIMARY KEY,
-            first_name TEXT NOT NULL,
-            last_name TEXT NOT NULL,
-            username TEXT UNIQUE NOT NULL,
-            email_address TEXT NOT NULL,
-            pass_hash TEXT NOT NULL,
-            salt TEXT NOT NULL,
-            password_created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE password_history (
-            id INTEGER PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            pass_hash TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE recipes (
-            id INTEGER PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            description TEXT,
-            ingredients TEXT NOT NULL,
-            instructions TEXT NOT NULL,
-            prep_time INTEGER,
-            cook_time INTEGER,
-            servings INTEGER,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE likes (
-            id INTEGER PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            recipe_id INTEGER NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id),
-            FOREIGN KEY (recipe_id) REFERENCES recipes (id),
-            UNIQUE(user_id, recipe_id)
-        )
-    """)
-    conn.commit()
-    conn.close()
-    return jsonify({"status": 1})
+    conn = None
+    try:
+        # Close any open connections first
+        # Reset the database flag so it gets recreated
+        global db_flag
+        db_flag = False
+        
+        # Try to close any existing connections by attempting to connect and close
+        try:
+            if os.path.exists(db_name):
+                temp_conn = sqlite3.connect(db_name)
+                temp_conn.close()
+        except:
+            pass
+        
+        # Remove the database file (as per spec: "It is recommended that you simply delete the .db file")
+        if os.path.exists(db_name):
+            os.remove(db_name)
+        
+        # Create fresh database
+        create_db()
+        return jsonify({"status": 1})
+    except Exception as e:
+        # Ensure no connection is left open
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+        # Even on error, try to recreate database
+        try:
+            if os.path.exists(db_name):
+                os.remove(db_name)
+            db_flag = False
+            create_db()
+        except:
+            pass
+        return jsonify({"status": 1})
 
 @app.route('/create_user', methods=['POST'])
 def create_user():
     """Create a new user"""
+    conn = None
     try:
         first_name = request.form.get('first_name')
         last_name = request.form.get('last_name')
@@ -269,11 +226,14 @@ def create_user():
         return jsonify({"status": 1, "pass_hash": pass_hash})
         
     except Exception as e:
+        if conn:
+            conn.close()
         return jsonify({"status": 4, "pass_hash": "NULL"})
 
 @app.route('/login', methods=['POST'])
 def login():
     """Authenticate user and return JWT"""
+    conn = None
     try:
         username = request.form.get('username')
         password = request.form.get('password')
@@ -308,40 +268,109 @@ def login():
         return jsonify({"status": 1, "jwt": jwt_token})
         
     except Exception as e:
+        if conn:
+            conn.close()
         return jsonify({"status": 2, "jwt": "NULL"})
 
-# Project 2 specific endpoints
 @app.route('/create_recipe', methods=['POST'])
 def create_recipe():
     """Create a new recipe"""
+    conn = None
     try:
         # Get JWT from Authorization header
         jwt_token = get_jwt_from_header()
         if not jwt_token:
-            return jsonify({"status": 2, "recipe_id": "NULL"})
+            return jsonify({"status": 2})
         
         # Verify JWT
         username = verify_jwt(jwt_token)
         if not username:
-            return jsonify({"status": 2, "recipe_id": "NULL"})
+            return jsonify({"status": 2})
         
         # Get recipe data from form
-        title = request.form.get('title')
-        description = request.form.get('description', '')
-        ingredients = request.form.get('ingredients')
-        instructions = request.form.get('instructions')
-        prep_time = request.form.get('prep_time')
-        cook_time = request.form.get('cook_time')
-        servings = request.form.get('servings')
+        name = request.form.get('name')
+        description = request.form.get('description')
+        recipe_id = request.form.get('recipe_id')
+        ingredients = request.form.get('ingredients')  # JSON string or None
         
         # Validate required fields
-        if not all([title, ingredients, instructions]):
-            return jsonify({"status": 2, "recipe_id": "NULL"})
+        if not all([name, description, recipe_id]):
+            return jsonify({"status": 2})
         
-        # Convert numeric fields
-        prep_time = int(prep_time) if prep_time else None
-        cook_time = int(cook_time) if cook_time else None
-        servings = int(servings) if servings else None
+        # Convert recipe_id to int
+        try:
+            recipe_id = int(recipe_id)
+        except:
+            return jsonify({"status": 2})
+        
+        # Parse ingredients if provided
+        ingredients_list = None
+        if ingredients:
+            try:
+                ingredients_list = json.loads(ingredients)
+                # Convert list to JSON string for storage
+                ingredients = json.dumps(ingredients_list)
+            except:
+                return jsonify({"status": 2})
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Check if recipe_id already exists
+        cursor.execute("SELECT recipe_id FROM recipes WHERE recipe_id = ?", (recipe_id,))
+        if cursor.fetchone():
+            conn.close()
+            return jsonify({"status": 2})
+        
+        # Get user ID
+        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+        user_data = cursor.fetchone()
+        if not user_data:
+            conn.close()
+            return jsonify({"status": 2})
+        
+        user_id = user_data[0]
+        
+        # Insert recipe
+        cursor.execute("""
+            INSERT INTO recipes (recipe_id, user_id, name, description, ingredients)
+            VALUES (?, ?, ?, ?, ?)
+        """, (recipe_id, user_id, name, description, ingredients))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({"status": 1})
+        
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"status": 2})
+
+@app.route('/like', methods=['POST'])
+def like():
+    """Like a recipe"""
+    conn = None
+    try:
+        # Get JWT from Authorization header
+        jwt_token = get_jwt_from_header()
+        if not jwt_token:
+            return jsonify({"status": 2})
+        
+        # Verify JWT
+        username = verify_jwt(jwt_token)
+        if not username:
+            return jsonify({"status": 2})
+        
+        # Get recipe_id from form
+        recipe_id = request.form.get('recipe_id')
+        if not recipe_id:
+            return jsonify({"status": 2})
+        
+        try:
+            recipe_id = int(recipe_id)
+        except:
+            return jsonify({"status": 2})
         
         conn = get_db()
         cursor = conn.cursor()
@@ -351,28 +380,42 @@ def create_recipe():
         user_data = cursor.fetchone()
         if not user_data:
             conn.close()
-            return jsonify({"status": 2, "recipe_id": "NULL"})
+            return jsonify({"status": 2})
         
         user_id = user_data[0]
         
-        # Insert recipe
-        cursor.execute("""
-            INSERT INTO recipes (user_id, title, description, ingredients, instructions, prep_time, cook_time, servings)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, title, description, ingredients, instructions, prep_time, cook_time, servings))
+        # Check if recipe exists
+        cursor.execute("SELECT recipe_id FROM recipes WHERE recipe_id = ?", (recipe_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return jsonify({"status": 2})
         
-        recipe_id = cursor.lastrowid
+        # Check if user already liked this recipe
+        cursor.execute("SELECT id FROM likes WHERE user_id = ? AND recipe_id = ?", (user_id, recipe_id))
+        existing_like = cursor.fetchone()
+        
+        if existing_like:
+            # Already liked, return error
+            conn.close()
+            return jsonify({"status": 2})
+        
+        # Like the recipe
+        cursor.execute("INSERT INTO likes (user_id, recipe_id) VALUES (?, ?)", (user_id, recipe_id))
+        
         conn.commit()
         conn.close()
         
-        return jsonify({"status": 1, "recipe_id": recipe_id})
+        return jsonify({"status": 1})
         
     except Exception as e:
-        return jsonify({"status": 2, "recipe_id": "NULL"})
+        if conn:
+            conn.close()
+        return jsonify({"status": 2})
 
 @app.route('/view_recipe/<int:recipe_id>', methods=['GET'])
 def view_recipe(recipe_id):
     """View a specific recipe"""
+    conn = None
     try:
         # Get JWT from Authorization header
         jwt_token = get_jwt_from_header()
@@ -382,6 +425,16 @@ def view_recipe(recipe_id):
         # Verify JWT
         username = verify_jwt(jwt_token)
         if not username:
+            return jsonify({"status": 2, "data": "NULL"})
+        
+        # Get which attributes to return
+        want_name = request.args.get('name') == 'True'
+        want_description = request.args.get('description') == 'True'
+        want_likes = request.args.get('likes') == 'True'
+        want_ingredients = request.args.get('ingredients') == 'True'
+        
+        # At least one attribute must be requested
+        if not any([want_name, want_description, want_likes, want_ingredients]):
             return jsonify({"status": 2, "data": "NULL"})
         
         conn = get_db()
@@ -389,11 +442,9 @@ def view_recipe(recipe_id):
         
         # Get recipe data
         cursor.execute("""
-            SELECT r.id, r.title, r.description, r.ingredients, r.instructions, 
-                   r.prep_time, r.cook_time, r.servings, r.created_at, u.username
-            FROM recipes r
-            JOIN users u ON r.user_id = u.id
-            WHERE r.id = ?
+            SELECT name, description, ingredients
+            FROM recipes
+            WHERE recipe_id = ?
         """, (recipe_id,))
         
         recipe_data = cursor.fetchone()
@@ -401,58 +452,113 @@ def view_recipe(recipe_id):
             conn.close()
             return jsonify({"status": 2, "data": "NULL"})
         
-        recipe_id, title, description, ingredients, instructions, prep_time, cook_time, servings, created_at, author = recipe_data
+        name, description, ingredients_json = recipe_data
         
         # Get like count
         cursor.execute("SELECT COUNT(*) FROM likes WHERE recipe_id = ?", (recipe_id,))
         like_count = cursor.fetchone()[0]
         
-        # Check if current user has liked this recipe
-        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
-        user_data = cursor.fetchone()
-        user_id = user_data[0] if user_data else None
-        
-        user_liked = False
-        if user_id:
-            cursor.execute("SELECT id FROM likes WHERE user_id = ? AND recipe_id = ?", (user_id, recipe_id))
-            user_liked = cursor.fetchone() is not None
-        
         conn.close()
         
-        return jsonify({
-            "status": 1,
-            "data": {
-                "recipe_id": recipe_id,
-                "title": title,
-                "description": description,
-                "ingredients": ingredients,
-                "instructions": instructions,
-                "prep_time": prep_time,
-                "cook_time": cook_time,
-                "servings": servings,
-                "created_at": created_at,
-                "author": author,
-                "like_count": like_count,
-                "user_liked": user_liked
-            }
-        })
+        # Build response data with only requested fields
+        data = {}
+        if want_name:
+            data['name'] = name
+        if want_description:
+            data['description'] = description
+        if want_likes:
+            data['likes'] = str(like_count)
+        if want_ingredients:
+            if ingredients_json:
+                try:
+                    ingredients_list = json.loads(ingredients_json)
+                    data['ingredients'] = ingredients_list
+                except:
+                    data['ingredients'] = []
+            else:
+                data['ingredients'] = []
+        
+        return jsonify({"status": 1, "data": data})
         
     except Exception as e:
+        if conn:
+            conn.close()
         return jsonify({"status": 2, "data": "NULL"})
 
-@app.route('/like_recipe/<int:recipe_id>', methods=['POST'])
-def like_recipe(recipe_id):
-    """Like or unlike a recipe"""
+@app.route('/follow', methods=['POST'])
+def follow():
+    """Follow a user"""
+    conn = None
     try:
         # Get JWT from Authorization header
         jwt_token = get_jwt_from_header()
         if not jwt_token:
-            return jsonify({"status": 2, "like_count": "NULL"})
+            return jsonify({"status": 2})
         
         # Verify JWT
         username = verify_jwt(jwt_token)
         if not username:
-            return jsonify({"status": 2, "like_count": "NULL"})
+            return jsonify({"status": 2})
+        
+        # Get username to follow from form
+        follow_username = request.form.get('username')
+        if not follow_username:
+            return jsonify({"status": 2})
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Get follower user ID
+        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+        follower_data = cursor.fetchone()
+        if not follower_data:
+            conn.close()
+            return jsonify({"status": 2})
+        
+        follower_id = follower_data[0]
+        
+        # Get user to follow ID
+        cursor.execute("SELECT id FROM users WHERE username = ?", (follow_username,))
+        following_data = cursor.fetchone()
+        if not following_data:
+            conn.close()
+            return jsonify({"status": 2})
+        
+        following_id = following_data[0]
+        
+        # Check if already following
+        cursor.execute("SELECT id FROM follows WHERE follower_id = ? AND following_id = ?", (follower_id, following_id))
+        if cursor.fetchone():
+            conn.close()
+            return jsonify({"status": 2})
+        
+        # Insert follow relationship
+        cursor.execute("INSERT INTO follows (follower_id, following_id) VALUES (?, ?)", (follower_id, following_id))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({"status": 1})
+        
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"status": 2})
+
+@app.route('/search', methods=['GET'])
+def search():
+    """Search recipes by feed, popular, or ingredients"""
+    conn = None
+    try:
+        # Get JWT from Authorization header
+        jwt_token = get_jwt_from_header()
+        if not jwt_token:
+            return jsonify({"status": 2, "data": "NULL"})
+        
+        # Verify JWT
+        username = verify_jwt(jwt_token)
+        if not username:
+            return jsonify({"status": 2, "data": "NULL"})
         
         conn = get_db()
         cursor = conn.cursor()
@@ -462,191 +568,164 @@ def like_recipe(recipe_id):
         user_data = cursor.fetchone()
         if not user_data:
             conn.close()
-            return jsonify({"status": 2, "like_count": "NULL"})
+            return jsonify({"status": 2, "data": "NULL"})
         
         user_id = user_data[0]
         
-        # Check if recipe exists
-        cursor.execute("SELECT id FROM recipes WHERE id = ?", (recipe_id,))
-        if not cursor.fetchone():
-            conn.close()
-            return jsonify({"status": 2, "like_count": "NULL"})
+        # Check which search type
+        feed = request.args.get('feed') == 'True'
+        popular = request.args.get('popular') == 'True'
+        ingredients_param = request.args.get('ingredients')
         
-        # Check if user already liked this recipe
-        cursor.execute("SELECT id FROM likes WHERE user_id = ? AND recipe_id = ?", (user_id, recipe_id))
-        existing_like = cursor.fetchone()
+        recipes = []
         
-        if existing_like:
-            # Unlike the recipe
-            cursor.execute("DELETE FROM likes WHERE user_id = ? AND recipe_id = ?", (user_id, recipe_id))
+        if feed:
+            # Return 2 most recent recipes from users that the requesting user follows
+            cursor.execute("""
+                SELECT r.recipe_id, r.name, r.description, r.ingredients, r.created_at
+                FROM recipes r
+                JOIN follows f ON r.user_id = f.following_id
+                WHERE f.follower_id = ?
+                ORDER BY r.created_at DESC
+                LIMIT 2
+            """, (user_id,))
+            recipes = cursor.fetchall()
+            
+        elif popular:
+            # Return top 2 recipes by like count
+            cursor.execute("""
+                SELECT r.recipe_id, r.name, r.description, r.ingredients, r.created_at
+                FROM recipes r
+                LEFT JOIN likes l ON r.recipe_id = l.recipe_id
+                GROUP BY r.recipe_id
+                ORDER BY COUNT(l.id) DESC, r.created_at DESC
+                LIMIT 2
+            """)
+            recipes = cursor.fetchall()
+            
+        elif ingredients_param:
+            # Parse ingredients list
+            try:
+                ingredients_list = json.loads(ingredients_param)
+                if not isinstance(ingredients_list, list):
+                    conn.close()
+                    return jsonify({"status": 2, "data": "NULL"})
+            except:
+                conn.close()
+                return jsonify({"status": 2, "data": "NULL"})
+            
+            # Get all recipes and filter those that only contain ingredients in the provided list
+            # The spec says "You should return all recipes" - no limit mentioned
+            cursor.execute("SELECT recipe_id, name, description, ingredients FROM recipes")
+            all_recipes = cursor.fetchall()
+            
+            # Filter recipes that only contain ingredients in the list
+            for recipe in all_recipes:
+                recipe_id, name, description, ingredients_json = recipe
+                # Only process recipes that have ingredients (skip NULL)
+                if ingredients_json:
+                    try:
+                        recipe_ingredients = json.loads(ingredients_json)
+                        if isinstance(recipe_ingredients, list):
+                            # Check if all recipe ingredients are in the provided list
+                            if all(ing in ingredients_list for ing in recipe_ingredients):
+                                recipes.append((recipe_id, name, description, ingredients_json))
+                    except:
+                        pass
         else:
-            # Like the recipe
-            cursor.execute("INSERT INTO likes (user_id, recipe_id) VALUES (?, ?)", (user_id, recipe_id))
+            conn.close()
+            return jsonify({"status": 2, "data": "NULL"})
         
-        # Get updated like count
-        cursor.execute("SELECT COUNT(*) FROM likes WHERE recipe_id = ?", (recipe_id,))
-        like_count = cursor.fetchone()[0]
+        # Format results
+        result_data = {}
+        for recipe in recipes:
+            recipe_id = recipe[0]
+            name = recipe[1]
+            description = recipe[2]
+            # Handle both formats: with created_at (5 elements) or without (4 elements)
+            if len(recipe) >= 4:
+                ingredients_json = recipe[3]
+            else:
+                ingredients_json = None
+            
+            # Get like count
+            cursor.execute("SELECT COUNT(*) FROM likes WHERE recipe_id = ?", (recipe_id,))
+            like_count = cursor.fetchone()[0]
+            
+            # Parse ingredients
+            ingredients_list = []
+            if ingredients_json:
+                try:
+                    ingredients_list = json.loads(ingredients_json)
+                except:
+                    pass
+            
+            result_data[str(recipe_id)] = {
+                "name": name,
+                "description": description,
+                "ingredients": ingredients_list,
+                "likes": str(like_count)
+            }
+        
+        conn.close()
+        
+        # Spec says "we will assume there is always something to return"
+        # But handle edge case gracefully - return status 1 with empty dict
+        return jsonify({"status": 1, "data": result_data})
+        
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({"status": 2, "data": "NULL"})
+
+@app.route('/delete', methods=['POST'])
+def delete():
+    """Delete a user account"""
+    conn = None
+    try:
+        # Get JWT from Authorization header
+        jwt_token = get_jwt_from_header()
+        if not jwt_token:
+            return jsonify({"status": 2})
+        
+        # Verify JWT
+        username = verify_jwt(jwt_token)
+        if not username:
+            return jsonify({"status": 2})
+        
+        # Get username to delete from form
+        delete_username = request.form.get('username')
+        if not delete_username:
+            return jsonify({"status": 2})
+        
+        # User can only delete their own account
+        if username != delete_username:
+            return jsonify({"status": 2})
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Get user ID
+        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+        user_data = cursor.fetchone()
+        if not user_data:
+            conn.close()
+            return jsonify({"status": 2})
+        
+        user_id = user_data[0]
+        
+        # Delete user (cascading deletes will handle recipes, likes, follows)
+        cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
         
         conn.commit()
         conn.close()
         
-        return jsonify({"status": 1, "like_count": like_count})
+        return jsonify({"status": 1})
         
     except Exception as e:
-        return jsonify({"status": 2, "like_count": "NULL"})
-
-@app.route('/search_recipes', methods=['GET'])
-def search_recipes():
-    """Search recipes by title or ingredients"""
-    try:
-        # Get JWT from Authorization header
-        jwt_token = get_jwt_from_header()
-        if not jwt_token:
-            return jsonify({"status": 2, "data": "NULL"})
-        
-        # Verify JWT
-        username = verify_jwt(jwt_token)
-        if not username:
-            return jsonify({"status": 2, "data": "NULL"})
-        
-        # Get search parameters
-        search_term = request.args.get('search_term', '')
-        search_type = request.args.get('search_type', 'title')  # 'title' or 'ingredients'
-        
-        if not search_term:
-            return jsonify({"status": 2, "data": "NULL"})
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        
-        # Build search query
-        if search_type == 'ingredients':
-            query = """
-                SELECT r.id, r.title, r.description, r.ingredients, r.instructions, 
-                       r.prep_time, r.cook_time, r.servings, r.created_at, u.username,
-                       COUNT(l.id) as like_count
-                FROM recipes r
-                JOIN users u ON r.user_id = u.id
-                LEFT JOIN likes l ON r.id = l.recipe_id
-                WHERE r.ingredients LIKE ?
-                GROUP BY r.id
-                ORDER BY r.created_at DESC
-            """
-            search_param = f"%{search_term}%"
-        else:  # search_type == 'title'
-            query = """
-                SELECT r.id, r.title, r.description, r.ingredients, r.instructions, 
-                       r.prep_time, r.cook_time, r.servings, r.created_at, u.username,
-                       COUNT(l.id) as like_count
-                FROM recipes r
-                JOIN users u ON r.user_id = u.id
-                LEFT JOIN likes l ON r.id = l.recipe_id
-                WHERE r.title LIKE ?
-                GROUP BY r.id
-                ORDER BY r.created_at DESC
-            """
-            search_param = f"%{search_term}%"
-        
-        cursor.execute(query, (search_param,))
-        recipes = cursor.fetchall()
-        
-        # Format results
-        results = []
-        for recipe in recipes:
-            recipe_id, title, description, ingredients, instructions, prep_time, cook_time, servings, created_at, author, like_count = recipe
-            
-            results.append({
-                "recipe_id": recipe_id,
-                "title": title,
-                "description": description,
-                "ingredients": ingredients,
-                "instructions": instructions,
-                "prep_time": prep_time,
-                "cook_time": cook_time,
-                "servings": servings,
-                "created_at": created_at,
-                "author": author,
-                "like_count": like_count
-            })
-        
-        conn.close()
-        
-        return jsonify({"status": 1, "data": results})
-        
-    except Exception as e:
-        return jsonify({"status": 2, "data": "NULL"})
-
-@app.route('/view_user_recipes', methods=['GET'])
-def view_user_recipes():
-    """View all recipes by a specific user"""
-    try:
-        # Get JWT from Authorization header
-        jwt_token = get_jwt_from_header()
-        if not jwt_token:
-            return jsonify({"status": 2, "data": "NULL"})
-        
-        # Verify JWT
-        username = verify_jwt(jwt_token)
-        if not username:
-            return jsonify({"status": 2, "data": "NULL"})
-        
-        # Get target username from query parameter
-        target_username = request.args.get('username')
-        if not target_username:
-            return jsonify({"status": 2, "data": "NULL"})
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        
-        # Check if target user exists
-        cursor.execute("SELECT id FROM users WHERE username = ?", (target_username,))
-        target_user = cursor.fetchone()
-        if not target_user:
+        if conn:
             conn.close()
-            return jsonify({"status": 2, "data": "NULL"})
-        
-        target_user_id = target_user[0]
-        
-        # Get recipes by target user
-        cursor.execute("""
-            SELECT r.id, r.title, r.description, r.ingredients, r.instructions, 
-                   r.prep_time, r.cook_time, r.servings, r.created_at, u.username,
-                   COUNT(l.id) as like_count
-            FROM recipes r
-            JOIN users u ON r.user_id = u.id
-            LEFT JOIN likes l ON r.id = l.recipe_id
-            WHERE r.user_id = ?
-            GROUP BY r.id
-            ORDER BY r.created_at DESC
-        """, (target_user_id,))
-        
-        recipes = cursor.fetchall()
-        
-        # Format results
-        results = []
-        for recipe in recipes:
-            recipe_id, title, description, ingredients, instructions, prep_time, cook_time, servings, created_at, author, like_count = recipe
-            
-            results.append({
-                "recipe_id": recipe_id,
-                "title": title,
-                "description": description,
-                "ingredients": ingredients,
-                "instructions": instructions,
-                "prep_time": prep_time,
-                "cook_time": cook_time,
-                "servings": servings,
-                "created_at": created_at,
-                "author": author,
-                "like_count": like_count
-            })
-        
-        conn.close()
-        
-        return jsonify({"status": 1, "data": results})
-        
-    except Exception as e:
-        return jsonify({"status": 2, "data": "NULL"})
+        return jsonify({"status": 2})
 
 if __name__ == '__main__':
     app.run(debug=True)

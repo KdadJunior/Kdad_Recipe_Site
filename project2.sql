@@ -1,4 +1,5 @@
 DROP TABLE IF EXISTS password_history;
+DROP TABLE IF EXISTS follows;
 DROP TABLE IF EXISTS likes;
 DROP TABLE IF EXISTS recipes;
 DROP TABLE IF EXISTS users;
@@ -19,21 +20,17 @@ CREATE TABLE password_history (
     user_id INTEGER NOT NULL,
     pass_hash TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users (id)
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 CREATE TABLE recipes (
-    id INTEGER PRIMARY KEY,
+    recipe_id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT,
-    ingredients TEXT NOT NULL,
-    instructions TEXT NOT NULL,
-    prep_time INTEGER,
-    cook_time INTEGER,
-    servings INTEGER,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    ingredients TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users (id)
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 CREATE TABLE likes (
@@ -41,7 +38,17 @@ CREATE TABLE likes (
     user_id INTEGER NOT NULL,
     recipe_id INTEGER NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users (id),
-    FOREIGN KEY (recipe_id) REFERENCES recipes (id),
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    FOREIGN KEY (recipe_id) REFERENCES recipes (recipe_id) ON DELETE CASCADE,
     UNIQUE(user_id, recipe_id)
+);
+
+CREATE TABLE follows (
+    id INTEGER PRIMARY KEY,
+    follower_id INTEGER NOT NULL,
+    following_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (follower_id) REFERENCES users (id) ON DELETE CASCADE,
+    FOREIGN KEY (following_id) REFERENCES users (id) ON DELETE CASCADE,
+    UNIQUE(follower_id, following_id)
 );
