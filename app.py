@@ -23,8 +23,6 @@ with open('key.txt', 'r') as f:
 def create_db():
     """Create database from SQL file"""
     conn = sqlite3.connect(db_name)
-    # Enable foreign keys
-    conn.execute("PRAGMA foreign_keys = ON")
     
     with open(sql_file, 'r') as sql_startup:
         init_db = sql_startup.read()
@@ -125,6 +123,30 @@ def get_jwt_from_header():
         return None
     return auth_header
 
+def get_post_param(param_name):
+    """Robustly extract a POST parameter from form, JSON, or raw body."""
+    # 1) Standard form field
+    value = request.form.get(param_name)
+    if value is not None and value != "":
+        return value
+    # 2) JSON body
+    try:
+        json_body = request.get_json(silent=True)
+        if isinstance(json_body, dict) and param_name in json_body and json_body[param_name] != "":
+            return json_body[param_name]
+    except:
+        pass
+    # 3) URL-encoded raw body fallback
+    try:
+        from urllib.parse import parse_qs
+        raw = request.get_data(as_text=True) or ""
+        parsed = parse_qs(raw, keep_blank_values=True)
+        if param_name in parsed and len(parsed[param_name]) > 0:
+            return parsed[param_name][0]
+    except:
+        pass
+    return None
+
 @app.route('/clear', methods=['GET'])
 def clear_db():
     """Clear the database and recreate tables"""
@@ -172,15 +194,19 @@ def create_user():
     """Create a new user"""
     conn = None
     try:
-        first_name = request.form.get('first_name')
-        last_name = request.form.get('last_name')
-        username = request.form.get('username')
-        email_address = request.form.get('email_address')
-        password = request.form.get('password')
-        salt = request.form.get('salt')
+        first_name = get_post_param('first_name')
+        last_name = get_post_param('last_name')
+        username = get_post_param('username')
+        email_address = get_post_param('email_address')
+        password = get_post_param('password')
+        salt = get_post_param('salt')
         
         # Validate required fields
         if not all([first_name, last_name, username, email_address, password, salt]):
+            return jsonify({"status": 4, "pass_hash": "NULL"})
+        
+        # Validate field lengths (max 254 characters)
+        if len(first_name) > 254 or len(last_name) > 254 or len(username) > 254 or len(email_address) > 254 or len(password) > 254 or len(salt) > 254:
             return jsonify({"status": 4, "pass_hash": "NULL"})
         
         # Validate password requirements
@@ -235,8 +261,8 @@ def login():
     """Authenticate user and return JWT"""
     conn = None
     try:
-        username = request.form.get('username')
-        password = request.form.get('password')
+        username = get_post_param('username')
+        password = get_post_param('password')
         
         if not username or not password:
             return jsonify({"status": 2, "jwt": "NULL"})
@@ -288,10 +314,10 @@ def create_recipe():
             return jsonify({"status": 2})
         
         # Get recipe data from form
-        name = request.form.get('name')
-        description = request.form.get('description')
-        recipe_id = request.form.get('recipe_id')
-        ingredients = request.form.get('ingredients')  # JSON string or None
+        name = get_post_param('name')
+        description = get_post_param('description')
+        recipe_id = get_post_param('recipe_id')
+        ingredients = get_post_param('ingredients')  # JSON string or None
         
         # Validate required fields
         if not all([name, description, recipe_id]):
@@ -333,9 +359,19 @@ def create_recipe():
         
         # Insert recipe
         cursor.execute("""
-            INSERT INTO recipes (recipe_id, user_id, name, description, ingredients)
-            VALUES (?, ?, ?, ?, ?)
-        """, (recipe_id, user_id, name, description, ingredients))
+            INSERT INTO recipes (recipe_id, user_id, name, description)
+            VALUES (?, ?, ?, ?)
+        """, (recipe_id, user_id, name, description))
+        # Record insertion order for stable tie-breaking on feed/popular
+        cursor.execute("INSERT INTO recipe_inserts (recipe_id) VALUES (?)", (recipe_id,))
+        
+        # Insert ingredients if provided
+        if ingredients_list:
+            for ingredient in ingredients_list:
+                cursor.execute("""
+                    INSERT INTO recipe_ingredients (recipe_id, ingredient)
+                    VALUES (?, ?)
+                """, (recipe_id, ingredient))
         
         conn.commit()
         conn.close()
@@ -363,7 +399,7 @@ def like():
             return jsonify({"status": 2})
         
         # Get recipe_id from form
-        recipe_id = request.form.get('recipe_id')
+        recipe_id = get_post_param('recipe_id')
         if not recipe_id:
             return jsonify({"status": 2})
         
@@ -433,16 +469,16 @@ def view_recipe(recipe_id):
         want_likes = request.args.get('likes') == 'True'
         want_ingredients = request.args.get('ingredients') == 'True'
         
-        # At least one attribute must be requested
+        # If no attributes requested, return empty data with status 1
         if not any([want_name, want_description, want_likes, want_ingredients]):
-            return jsonify({"status": 2, "data": "NULL"})
+            return jsonify({"status": 1, "data": {}})
         
         conn = get_db()
         cursor = conn.cursor()
         
         # Get recipe data
         cursor.execute("""
-            SELECT name, description, ingredients
+            SELECT name, description
             FROM recipes
             WHERE recipe_id = ?
         """, (recipe_id,))
@@ -452,11 +488,17 @@ def view_recipe(recipe_id):
             conn.close()
             return jsonify({"status": 2, "data": "NULL"})
         
-        name, description, ingredients_json = recipe_data
+        name, description = recipe_data
         
         # Get like count
         cursor.execute("SELECT COUNT(*) FROM likes WHERE recipe_id = ?", (recipe_id,))
         like_count = cursor.fetchone()[0]
+        
+        # Get ingredients if requested
+        ingredients_list = []
+        if want_ingredients:
+            cursor.execute("SELECT ingredient FROM recipe_ingredients WHERE recipe_id = ? ORDER BY ingredient", (recipe_id,))
+            ingredients_list = [row[0] for row in cursor.fetchall()]
         
         conn.close()
         
@@ -469,14 +511,7 @@ def view_recipe(recipe_id):
         if want_likes:
             data['likes'] = str(like_count)
         if want_ingredients:
-            if ingredients_json:
-                try:
-                    ingredients_list = json.loads(ingredients_json)
-                    data['ingredients'] = ingredients_list
-                except:
-                    data['ingredients'] = []
-            else:
-                data['ingredients'] = []
+            data['ingredients'] = ingredients_list
         
         return jsonify({"status": 1, "data": data})
         
@@ -501,7 +536,7 @@ def follow():
             return jsonify({"status": 2})
         
         # Get username to follow from form
-        follow_username = request.form.get('username')
+        follow_username = get_post_param('username')
         if not follow_username:
             return jsonify({"status": 2})
         
@@ -525,6 +560,11 @@ def follow():
             return jsonify({"status": 2})
         
         following_id = following_data[0]
+        
+        # Cannot follow yourself
+        if follower_id == following_id:
+            conn.close()
+            return jsonify({"status": 2})
         
         # Check if already following
         cursor.execute("SELECT id FROM follows WHERE follower_id = ? AND following_id = ?", (follower_id, following_id))
@@ -582,11 +622,12 @@ def search():
         if feed:
             # Return 2 most recent recipes from users that the requesting user follows
             cursor.execute("""
-                SELECT r.recipe_id, r.name, r.description, r.ingredients, r.created_at
+                SELECT r.recipe_id, r.name, r.description, r.created_at
                 FROM recipes r
                 JOIN follows f ON r.user_id = f.following_id
+                LEFT JOIN recipe_inserts ri ON ri.recipe_id = r.recipe_id
                 WHERE f.follower_id = ?
-                ORDER BY r.created_at DESC
+                ORDER BY r.created_at DESC, ri.seq DESC
                 LIMIT 2
             """, (user_id,))
             recipes = cursor.fetchall()
@@ -594,11 +635,12 @@ def search():
         elif popular:
             # Return top 2 recipes by like count
             cursor.execute("""
-                SELECT r.recipe_id, r.name, r.description, r.ingredients, r.created_at
+                SELECT r.recipe_id, r.name, r.description, r.created_at
                 FROM recipes r
                 LEFT JOIN likes l ON r.recipe_id = l.recipe_id
+                LEFT JOIN recipe_inserts ri ON ri.recipe_id = r.recipe_id
                 GROUP BY r.recipe_id
-                ORDER BY COUNT(l.id) DESC, r.created_at DESC
+                ORDER BY COUNT(l.id) DESC, r.created_at DESC, ri.seq DESC
                 LIMIT 2
             """)
             recipes = cursor.fetchall()
@@ -614,24 +656,29 @@ def search():
                 conn.close()
                 return jsonify({"status": 2, "data": "NULL"})
             
-            # Get all recipes and filter those that only contain ingredients in the provided list
-            # The spec says "You should return all recipes" - no limit mentioned
-            cursor.execute("SELECT recipe_id, name, description, ingredients FROM recipes")
-            all_recipes = cursor.fetchall()
-            
-            # Filter recipes that only contain ingredients in the list
-            for recipe in all_recipes:
-                recipe_id, name, description, ingredients_json = recipe
-                # Only process recipes that have ingredients (skip NULL)
-                if ingredients_json:
-                    try:
-                        recipe_ingredients = json.loads(ingredients_json)
-                        if isinstance(recipe_ingredients, list):
-                            # Check if all recipe ingredients are in the provided list
-                            if all(ing in ingredients_list for ing in recipe_ingredients):
-                                recipes.append((recipe_id, name, description, ingredients_json))
-                    except:
-                        pass
+            # If the provided ingredients list is empty, no recipe should match
+            # because a valid recipe must contain at least one ingredient.
+            if len(ingredients_list) == 0:
+                conn.close()
+                return jsonify({"status": 1, "data": {}})
+
+            # Get all recipes that only contain ingredients in the provided list
+            # Find recipes where ALL ingredients are in the provided list
+            placeholders = ','.join(['?'] * len(ingredients_list))
+            cursor.execute(f"""
+                SELECT DISTINCT r.recipe_id, r.name, r.description
+                FROM recipes r
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM recipe_ingredients ri
+                    WHERE ri.recipe_id = r.recipe_id
+                    AND ri.ingredient NOT IN ({placeholders})
+                )
+                AND EXISTS (
+                    SELECT 1 FROM recipe_ingredients ri
+                    WHERE ri.recipe_id = r.recipe_id
+                )
+            """, ingredients_list)
+            recipes = cursor.fetchall()
         else:
             conn.close()
             return jsonify({"status": 2, "data": "NULL"})
@@ -642,23 +689,14 @@ def search():
             recipe_id = recipe[0]
             name = recipe[1]
             description = recipe[2]
-            # Handle both formats: with created_at (5 elements) or without (4 elements)
-            if len(recipe) >= 4:
-                ingredients_json = recipe[3]
-            else:
-                ingredients_json = None
             
             # Get like count
             cursor.execute("SELECT COUNT(*) FROM likes WHERE recipe_id = ?", (recipe_id,))
             like_count = cursor.fetchone()[0]
             
-            # Parse ingredients
-            ingredients_list = []
-            if ingredients_json:
-                try:
-                    ingredients_list = json.loads(ingredients_json)
-                except:
-                    pass
+            # Get ingredients from recipe_ingredients table
+            cursor.execute("SELECT ingredient FROM recipe_ingredients WHERE recipe_id = ? ORDER BY ingredient", (recipe_id,))
+            ingredients_list = [row[0] for row in cursor.fetchall()]
             
             result_data[str(recipe_id)] = {
                 "name": name,
@@ -694,7 +732,7 @@ def delete():
             return jsonify({"status": 2})
         
         # Get username to delete from form
-        delete_username = request.form.get('username')
+        delete_username = get_post_param('username')
         if not delete_username:
             return jsonify({"status": 2})
         
@@ -728,4 +766,4 @@ def delete():
         return jsonify({"status": 2})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False)

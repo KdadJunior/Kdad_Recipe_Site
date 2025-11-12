@@ -1,6 +1,8 @@
 DROP TABLE IF EXISTS password_history;
 DROP TABLE IF EXISTS follows;
 DROP TABLE IF EXISTS likes;
+DROP TABLE IF EXISTS recipe_ingredients;
+DROP TABLE IF EXISTS recipe_inserts;
 DROP TABLE IF EXISTS recipes;
 DROP TABLE IF EXISTS users;
 
@@ -28,9 +30,23 @@ CREATE TABLE recipes (
     user_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL,
-    ingredients TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
+-- Track insertion sequence independent of recipe_id to break timestamp ties
+CREATE TABLE recipe_inserts (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipe_id INTEGER NOT NULL UNIQUE,
+    FOREIGN KEY (recipe_id) REFERENCES recipes (recipe_id) ON DELETE CASCADE
+);
+
+CREATE TABLE recipe_ingredients (
+    id INTEGER PRIMARY KEY,
+    recipe_id INTEGER NOT NULL,
+    ingredient TEXT NOT NULL,
+    FOREIGN KEY (recipe_id) REFERENCES recipes (recipe_id) ON DELETE CASCADE,
+    UNIQUE(recipe_id, ingredient)
 );
 
 CREATE TABLE likes (
